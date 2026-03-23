@@ -7,7 +7,6 @@ from flaml import AutoML
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, accuracy_score
 import google.generativeai as genai
-import io
 
 # --- CONFIGURATION & STYLING ---
 st.set_page_config(page_title="Analytics Platform", layout="wide")
@@ -31,9 +30,6 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Initialize Gemini (Replace with your actual Secret Key management)
-# genai.configure(api_key="YOUR_GEMINI_API_KEY")
-
 def get_gemini_insight(df_summary, task):
     try:
         model = genai.GenerativeModel('gemini-pro')
@@ -41,7 +37,7 @@ def get_gemini_insight(df_summary, task):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return "Insight generation currently unavailable."
+        return f"Insight generation currently unavailable: {e}"
 
 # --- APP HEADER ---
 st.title("📊 AutoML Deployment Agent")
@@ -70,9 +66,12 @@ if uploaded_file:
     # Simple Cleaning (Handling Nulls)
     df_clean = df.dropna()
     X = df_clean.drop(columns=[target_col])
-    # Convert categorical to numeric for FLAML
     X = pd.get_dummies(X, drop_first=True)
     y = df_clean[target_col]
+
+    # Encode target for classification if it's categorical
+    if task_type == "classification" and y.dtype == object:
+        y = y.astype("category").cat.codes
 
     st.write("### 🥈 Silver Layer: Cleaned Data Information")
     col1, col2 = st.columns(2)
@@ -94,32 +93,39 @@ if uploaded_file:
         st.write("### 🥇 Gold Layer: Model Training & Evaluation")
 
         with st.spinner("Optimizing model with FLAML..."):
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
-            )
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42
+                )
 
-            automl = AutoML()
-            settings = {
-                "time_budget": 30,  # 30 seconds for demo
-                "metric": "auto",
-                "task": task_type,
-                "log_file_name": "automl.log",
-            }
+                automl = AutoML()
+                settings = {
+                    "time_budget": 30,
+                    "metric": "auto",
+                    "task": task_type,
+                    "log_file_name": "automl.log",
+                    # Restrict to sklearn-1.4 compatible estimators only
+                    "estimator_list": ["lgbm", "xgboost", "rf", "extra_tree", "lrl1"],
+                }
 
-            automl.fit(X_train=X_train, y_train=y_train, **settings)
+                automl.fit(X_train=X_train, y_train=y_train, **settings)
 
-            st.success(f"✅ Best Model Found: **{automl.best_estimator}**")
+                st.success(f"✅ Best Model Found: **{automl.best_estimator}**")
 
-            # FIX: Convert predictions to clean numpy arrays
-            y_pred = np.array(automl.predict(X_test)).flatten()
-            y_test_arr = np.array(y_test).flatten()
+                # FIX: Force clean numpy arrays before passing to sklearn metrics
+                y_pred = np.array(automl.predict(X_test)).flatten()
+                y_test_arr = np.array(y_test).flatten()
 
-            if task_type == "classification":
-                score = accuracy_score(y_test_arr, y_pred)
-                st.metric("Model Accuracy", f"{score:.2%}")
-            else:
-                score = np.sqrt(mean_squared_error(y_test_arr, y_pred))
-                st.metric("RMSE", f"{score:.4f}")
+                if task_type == "classification":
+                    score = accuracy_score(y_test_arr, y_pred)
+                    st.metric("Model Accuracy", f"{score:.2%}")
+                else:
+                    score = np.sqrt(mean_squared_error(y_test_arr, y_pred))
+                    st.metric("RMSE", f"{score:.4f}")
+
+            except Exception as e:
+                st.error(f"❌ AutoML training failed: {e}")
+                st.stop()
 
         # 4. EXPLAINABILITY (SHAP)
         st.write("### 🔍 Interpretability (SHAP Analysis)")
@@ -129,7 +135,7 @@ if uploaded_file:
 
             fig, ax = plt.subplots()
             shap.summary_plot(shap_values, X_test, show=False)
-            plt.gcf().set_facecolor('#1e1e26')  # Match theme
+            plt.gcf().set_facecolor('#1e1e26')
             st.pyplot(fig)
         except Exception as e:
             st.warning(f"⚠️ SHAP explainability unavailable for this model type: {e}")

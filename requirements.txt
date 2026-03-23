@@ -3,7 +3,6 @@ pandas
 numpy
 matplotlib
 shap
-flaml[automl]
 scikit-learn
 google-generativeai
 openpyxl

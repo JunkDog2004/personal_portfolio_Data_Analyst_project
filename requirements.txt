@@ -4,6 +4,7 @@ pandas
 numpy
 matplotlib
 shap
+groq
 scikit-learn
 google-generativeai
 openpyxl

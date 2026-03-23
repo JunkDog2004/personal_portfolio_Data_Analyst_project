@@ -145,7 +145,6 @@ def show_shap(model, X_train, X_test):
 
 # --- 🚀 MAIN APP ---
 st.title("📊 AutoML Deployment Agent")
-st.subheader("Bronze → Silver → Gold Pipeline")
 
 st.sidebar.header("📁 Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])

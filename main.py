@@ -27,7 +27,7 @@ st.markdown("""
 # --- GEMINI INSIGHT (Streamlit Secrets only — no .env) ---
 def get_gemini_insight(df_summary, task):
     try:
-        api_key = st.secrets.get("GEMINI_API_KEY", None)
+        api_key = st.secrets.get("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", None)
         if not api_key:
             return "⚠️ No API key found. Go to **Manage App → Settings → Secrets** and add:\n```\nGEMINI_API_KEY = 'your-key-here'\n```"
         genai.configure(api_key=api_key)

@@ -151,12 +151,12 @@ st.sidebar.header("📁 Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # 🥉 BRONZE
+
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-    st.write("### 🥉 Bronze Layer: Raw Data")
+    st.write("### Raw Data")
     st.dataframe(df.head(10), use_container_width=True)
 
-    # 🥈 SILVER
+    
     st.sidebar.header("⚙️ Settings")
     target_col = st.sidebar.selectbox("Target Column (Avoid IDs!)", df.columns)
     task_type = st.sidebar.selectbox("Task Type", ["classification", "regression"])
@@ -168,7 +168,7 @@ if uploaded_file:
     if task_type == "classification" and y.dtype == object:
         y = y.astype("category").cat.codes
 
-    st.write("### 🥈 Silver Layer: Cleaned Data")
+    st.write("### Cleaned Data")
     col1, col2 = st.columns(2)
     col1.metric("Total Samples", len(df_clean))
     col2.metric("Features", len(X.columns))
@@ -177,10 +177,10 @@ if uploaded_file:
         summary = df_clean.describe().to_markdown()
         st.info(get_groq_insight(summary, task_type))
 
-    # 🥇 GOLD
+    
     if st.sidebar.button("🚀 Run AutoML Pipeline"):
         st.write("---")
-        st.write("### 🥇 Gold Layer: Model Training")
+        st.write("###  Model Training")
         
         try:
             # Handle class imbalance for splitting

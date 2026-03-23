@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import shap
 import warnings
-import google.generativeai as genai
+from groq import Groq  # Updated to Groq
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 from sklearn.metrics import mean_squared_error, accuracy_score
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
@@ -24,21 +24,25 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-# --- GEMINI INSIGHT (Streamlit Secrets only — no .env) ---
-def get_gemini_insight(df_summary, task):
+# --- GROQ INSIGHT (Updated) ---
+def get_groq_insight(df_summary, task):
     try:
         api_key = st.secrets.get("GROQ_API_KEY", None)
         if not api_key:
-            return "⚠️ No API key found. Go to **Manage App → Settings → Secrets** and add:\n```\nGEMINI_API_KEY = 'your-key-here'\n```"
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+            return "⚠️ No Groq API key found in Streamlit Secrets."
+        
+        client = Groq(api_key=api_key)
         prompt = (
             f"As a data expert, provide exactly 3 concise insights for a {task} task "
             f"based on this data summary:\n{df_summary}\n"
             f"Format as: 1. ... 2. ... 3. ..."
         )
-        response = model.generate_content(prompt)
-        return response.text
+        
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return completion.choices[0].message.content
     except Exception as e:
         return f"Insight generation failed: {e}"
 
@@ -46,7 +50,9 @@ def get_gemini_insight(df_summary, task):
 # --- SAFE CV SPLIT CALCULATOR ---
 def get_safe_cv_splits(y, task_type, max_splits=5):
     if task_type == "classification":
-        min_class_count = int(pd.Series(y).value_counts().min())
+        counts = pd.Series(y).value_counts()
+        if len(counts) < 2: return None
+        min_class_count = int(counts.min())
         n_splits = min(max_splits, min_class_count)
     else:
         n_splits = min(max_splits, len(y) // 2)
@@ -66,10 +72,10 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits)
         return scores.mean()
     else:
         model.fit(X_train, y_train)
+        preds = model.predict(X_test)
         if task_type == "classification":
-            return accuracy_score(y_test, model.predict(X_test))
+            return accuracy_score(y_test, preds)
         else:
-            preds = model.predict(X_test)
             ss_res = np.sum((np.array(y_test) - preds) ** 2)
             ss_tot = np.sum((np.array(y_test) - np.mean(y_test)) ** 2)
             return 1 - ss_res / ss_tot if ss_tot != 0 else 0.0
@@ -118,21 +124,17 @@ def run_automl(X_train, X_test, y_train, y_test, task_type):
     progress.empty()
 
     if best_model is not None:
-        best_model.fit(X_train, y_train)  # Final fit on full training data
-
+        best_model.fit(X_train, y_train) 
     return best_name, best_model, results
 
-
-# --- FAST SHAP (TreeExplainer only — no slow KernelExplainer) ---
+# --- SHAP ---
 def show_shap(model, X_train, X_test):
     st.write("### 🔍 Interpretability (SHAP Feature Importance)")
     try:
-        with st.spinner("Computing SHAP values..."):
+        with st.spinner("Computing SHAP..."):
             explainer = shap.TreeExplainer(model)
             X_sample = X_test.iloc[:min(100, len(X_test))]
             shap_values = explainer.shap_values(X_sample)
-
-            # For classifiers, shap_values is a list (one per class) — take class 1
             if isinstance(shap_values, list):
                 shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
 
@@ -142,52 +144,21 @@ def show_shap(model, X_train, X_test):
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
+    except:
+        st.warning("⚠️ SHAP not available for this model.")
 
-    except Exception:
-        # Fallback: plain feature importances for non-tree models
-        st.warning("⚠️ SHAP not available for this model — showing feature importances instead.")
-        try:
-            if hasattr(model, "feature_importances_"):
-                importances = pd.Series(model.feature_importances_, index=X_train.columns)
-            elif hasattr(model, "coef_"):
-                coef = model.coef_[0] if model.coef_.ndim > 1 else model.coef_
-                importances = pd.Series(np.abs(coef), index=X_train.columns)
-            else:
-                st.info("Feature importance not available for this model.")
-                return
-
-            importances = importances.sort_values(ascending=True).tail(20)
-            fig, ax = plt.subplots(figsize=(10, 6))
-            importances.plot(kind="barh", ax=ax, color="#7c7cff")
-            ax.set_facecolor("#2b2b36")
-            fig.patch.set_facecolor("#1e1e26")
-            ax.tick_params(colors="white")
-            ax.set_title("Feature Importances", color="white")
-            st.pyplot(fig)
-            plt.close()
-        except Exception as e2:
-            st.warning(f"Could not generate feature importance chart: {e2}")
-
-
-# =====================================================================
-# APP LAYOUT
-# =====================================================================
-
+# --- APP LAYOUT ---
 st.title("📊 AutoML Deployment Agent")
-st.subheader("Automated Pipeline: Bronze → Silver → Gold Layer Insights")
-st.write("Upload your dataset to begin the automated cleaning, training, and explanation process.")
-
 st.sidebar.header("Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # ── 1. BRONZE LAYER ──────────────────────────────────────────────
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
     st.write("### 🥉 Bronze Layer: Raw Data Preview")
     st.dataframe(df.head(10))
 
-    # ── 2. SILVER LAYER ──────────────────────────────────────────────
     st.sidebar.header("Settings")
+    # Hint: Avoid LocationID for classification!
     target_col = st.sidebar.selectbox("Select Target Column", df.columns)
     task_type  = st.sidebar.selectbox("Task Type", ["classification", "regression"])
 
@@ -195,88 +166,31 @@ if uploaded_file:
     X = pd.get_dummies(df_clean.drop(columns=[target_col]), drop_first=True)
     y = df_clean[target_col]
 
-    # Encode string targets for classification
     if task_type == "classification" and y.dtype == object:
         y = y.astype("category").cat.codes
-
-    # Warn if any class has very few samples
-    if task_type == "classification":
-        tiny = pd.Series(y).value_counts()
-        tiny = tiny[tiny < 5]
-        if not tiny.empty:
-            st.warning(f"⚠️ Some classes have very few samples {tiny.to_dict()}. CV folds will be adjusted automatically.")
 
     st.write("### 🥈 Silver Layer: Cleaned Data Information")
     c1, c2 = st.columns(2)
     with c1:
         st.write(f"**Total Samples:** {df_clean.shape[0]}")
         st.write(f"**Features Count:** {df_clean.shape[1] - 1}")
-        st.write(f"**Missing Values Dropped:** {df.shape[0] - df_clean.shape[0]}")
     with c2:
         if st.button("💡 Generate AI Insights"):
-            with st.spinner("Generating insights..."):
-                try:
-                    summary = df_clean.describe().to_markdown()
-                    insights = get_gemini_insight(summary, task_type)
-                    st.info(insights)
-                except Exception as e:
-                    st.warning(f"AI Insights unavailable: {e}")
+            with st.spinner("Asking Groq..."):
+                summary = df_clean.describe().to_markdown()
+                insights = get_groq_insight(summary, task_type)
+                st.info(insights)
 
-    # ── 3. GOLD LAYER ────────────────────────────────────────────────
     if st.sidebar.button("🚀 Run AutoML Pipeline"):
         st.write("---")
-        st.write("### 🥇 Gold Layer: Model Training & Evaluation")
-
+        st.write("### 🥇 Gold Layer")
         try:
-            # Stratified split for classification, plain for regression
-            try:
-                stratify = y if task_type == "classification" else None
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y, test_size=0.2, random_state=42, stratify=stratify
-                )
-            except ValueError:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y, test_size=0.2, random_state=42
-                )
-
-            best_name, best_model, all_results = run_automl(
-                X_train, X_test, y_train, y_test, task_type
-            )
-
-            if best_model is None:
-                st.error("❌ All models failed. Please check your dataset for sufficient samples per class.")
-                st.stop()
-
+            strat = y if task_type == "classification" else None
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=strat)
+            best_name, best_model, all_results = run_automl(X_train, X_test, y_train, y_test, task_type)
             st.success(f"✅ Best Model: **{best_name}**")
-
-            # Show all model scores
-            score_label = "Accuracy (CV)" if task_type == "classification" else "R² (CV)"
-            with st.expander("📊 All Model Scores"):
-                for name, score in all_results.items():
-                    if score is not None:
-                        st.write(f"- **{name}**: {score:.4f} ({score_label})")
-                    else:
-                        st.write(f"- **{name}**: ❌ Failed")
-
-            # Final test set evaluation
-            y_pred     = np.array(best_model.predict(X_test)).flatten()
-            y_test_arr = np.array(y_test).flatten()
-
-            if task_type == "classification":
-                st.metric("Test Accuracy", f"{accuracy_score(y_test_arr, y_pred):.2%}")
-            else:
-                st.metric("Test RMSE", f"{np.sqrt(mean_squared_error(y_test_arr, y_pred)):.4f}")
-
+            show_shap(best_model, X_train, X_test)
         except Exception as e:
             st.error(f"❌ Training failed: {e}")
-            st.stop()
-
-        # ── 4. SHAP ──────────────────────────────────────────────────
-        show_shap(best_model, X_train, X_test)
-
 else:
-    st.info("📂 Please upload a dataset in the sidebar to start the agent.")
-
-# --- FOOTER ---
-st.markdown("---")
-st.caption("AutoML Deployment Agent | Built with Streamlit & Scikit-learn")
+    st.info("📂 Please upload a dataset in the sidebar.")

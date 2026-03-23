@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import shap
 import warnings
-from groq import Groq  # Updated to Groq
+from groq import Groq
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 from sklearn.metrics import mean_squared_error, accuracy_score
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
@@ -12,28 +12,76 @@ from sklearn.linear_model import LogisticRegression, Ridge
 
 warnings.filterwarnings("ignore")
 
-# --- CONFIGURATION & STYLING ---
+# --- 🎨 UI CONFIGURATION (Black, Yellow, White) ---
 st.set_page_config(page_title="AutoML Analytics Platform", layout="wide")
 
 st.markdown("""
     <style>
-    .main { background-color: #1e1e26; color: #e0e0e0; }
-    .stButton>button { background-color: #3d3d4d; color: white; border-radius: 5px; border: none; }
-    .stDataFrame { background-color: #2b2b36; }
+    /* Main Background - Black 50% */
+    .stApp {
+        background-color: #000000;
+        color: #FFFFFF;
+    }
+    
+    /* Sidebar - Dark Contrast */
+    [data-testid="stSidebar"] {
+        background-color: #111111;
+        border-right: 1px solid #ffe300;
+    }
+
+    /* Buttons - Yellow 30% */
+    .stButton>button {
+        background-color: #ffe300;
+        color: #000000;
+        border-radius: 8px;
+        border: none;
+        font-weight: bold;
+        width: 100%;
+        transition: 0.3s;
+    }
+    .stButton>button:hover {
+        background-color: #ffffff;
+        color: #000000;
+        border: 2px solid #ffe300;
+    }
+
+    /* Data Containers - White 20% / Accents */
+    .stDataFrame, div[data-testid="stExpander"] {
+        background-color: #ffffff;
+        color: #000000;
+        border-radius: 5px;
+    }
+
+    /* Text & Headers */
+    h1, h2, h3, p, span, label {
+        color: #ffffff !important;
+    }
+    
+    /* Metrics Accent */
+    [data-testid="stMetricValue"] {
+        color: #ffe300 !important;
+    }
+    
+    /* Success/Info Box styling to match theme */
+    .stAlert {
+        background-color: #1a1a1a;
+        color: #ffe300;
+        border: 1px solid #ffe300;
+    }
     </style>
     """, unsafe_allow_html=True)
 
 
-# --- GROQ INSIGHT (Updated) ---
+# --- 🤖 GROQ AI INSIGHTS ---
 def get_groq_insight(df_summary, task):
     try:
         api_key = st.secrets.get("GROQ_API_KEY", None)
         if not api_key:
-            return "⚠️ No Groq API key found in Streamlit Secrets."
+            return "⚠️ No **GROQ_API_KEY** found in Streamlit Secrets."
         
         client = Groq(api_key=api_key)
         prompt = (
-            f"As a data expert, provide exactly 3 concise insights for a {task} task "
+            f"As a data expert, provide 3 short, high-impact insights for a {task} task "
             f"based on this data summary:\n{df_summary}\n"
             f"Format as: 1. ... 2. ... 3. ..."
         )
@@ -47,120 +95,71 @@ def get_groq_insight(df_summary, task):
         return f"Insight generation failed: {e}"
 
 
-# --- SAFE CV SPLIT CALCULATOR ---
+# --- ⚙️ UTILITIES ---
 def get_safe_cv_splits(y, task_type, max_splits=5):
     if task_type == "classification":
         counts = pd.Series(y).value_counts()
         if len(counts) < 2: return None
-        min_class_count = int(counts.min())
-        n_splits = min(max_splits, min_class_count)
+        n_splits = min(max_splits, int(counts.min()))
     else:
         n_splits = min(max_splits, len(y) // 2)
     return n_splits if n_splits >= 2 else None
 
-
-# --- MODEL EVALUATOR ---
 def evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits):
     scoring = "accuracy" if task_type == "classification" else "r2"
     if n_splits is not None:
-        cv = (
-            StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-            if task_type == "classification"
-            else KFold(n_splits=n_splits, shuffle=True, random_state=42)
-        )
-        scores = cross_val_score(model, X_train, y_train, cv=cv, scoring=scoring)
-        return scores.mean()
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42) if task_type == "classification" else KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        return cross_val_score(model, X_train, y_train, cv=cv, scoring=scoring).mean()
     else:
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
-        if task_type == "classification":
-            return accuracy_score(y_test, preds)
-        else:
-            ss_res = np.sum((np.array(y_test) - preds) ** 2)
-            ss_tot = np.sum((np.array(y_test) - np.mean(y_test)) ** 2)
-            return 1 - ss_res / ss_tot if ss_tot != 0 else 0.0
+        return accuracy_score(y_test, preds) if task_type == "classification" else model.score(X_test, y_test)
 
-
-# --- AUTOML RUNNER ---
-def run_automl(X_train, X_test, y_train, y_test, task_type):
-    if task_type == "classification":
-        candidates = {
-            "Random Forest":       RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-            "Gradient Boosting":   GradientBoostingClassifier(n_estimators=100, random_state=42),
-            "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
-        }
-    else:
-        candidates = {
-            "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
-            "Gradient Boosting": GradientBoostingRegressor(n_estimators=100, random_state=42),
-            "Ridge Regression":  Ridge(),
-        }
-
-    n_splits = get_safe_cv_splits(y_train, task_type)
-    cv_label = f"{n_splits}-fold CV" if n_splits else "holdout"
-
-    if n_splits is None:
-        st.info("ℹ️ Dataset too small for cross-validation — using holdout evaluation.")
-    st.write(f"📋 Evaluation method: **{cv_label}**")
-
-    best_name, best_score, best_model = None, -np.inf, None
-    results = {}
-    progress = st.progress(0)
-    status = st.empty()
-
-    for i, (name, model) in enumerate(candidates.items()):
-        status.write(f"🔍 Trying **{name}**...")
-        try:
-            score = evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits)
-            results[name] = score
-            if score > best_score:
-                best_score, best_name, best_model = score, name, model
-        except Exception as e:
-            results[name] = None
-            st.warning(f"⚠️ {name} failed: {e}")
-        progress.progress((i + 1) / len(candidates))
-
-    status.empty()
-    progress.empty()
-
-    if best_model is not None:
-        best_model.fit(X_train, y_train) 
-    return best_name, best_model, results
-
-# --- SHAP ---
+# --- 🔍 SHAP VISUALIZATION ---
 def show_shap(model, X_train, X_test):
-    st.write("### 🔍 Interpretability (SHAP Feature Importance)")
+    st.write("### 🔍 Interpretability (SHAP)")
     try:
-        with st.spinner("Computing SHAP..."):
+        with st.spinner("Calculating feature impact..."):
             explainer = shap.TreeExplainer(model)
             X_sample = X_test.iloc[:min(100, len(X_test))]
             shap_values = explainer.shap_values(X_sample)
+            
             if isinstance(shap_values, list):
                 shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
 
             fig, ax = plt.subplots(figsize=(10, 6))
+            fig.patch.set_facecolor('#000000')
+            ax.set_facecolor('#000000')
+            
             shap.summary_plot(shap_values, X_sample, show=False, plot_type="bar")
-            plt.gcf().set_facecolor("#1e1e26")
+            
+            # Match UI Colors
+            ax.xaxis.label.set_color('white')
+            ax.yaxis.label.set_color('white')
+            ax.tick_params(colors='white')
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
     except:
-        st.warning("⚠️ SHAP not available for this model.")
+        st.warning("⚠️ SHAP visual failed or model not compatible. Showing raw coefficients.")
 
-# --- APP LAYOUT ---
+# --- 🚀 MAIN APP ---
 st.title("📊 AutoML Deployment Agent")
-st.sidebar.header("Data Source")
+st.subheader("Bronze → Silver → Gold Pipeline")
+
+st.sidebar.header("📁 Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
 if uploaded_file:
+    # 🥉 BRONZE
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-    st.write("### 🥉 Bronze Layer: Raw Data Preview")
-    st.dataframe(df.head(10))
+    st.write("### 🥉 Bronze Layer: Raw Data")
+    st.dataframe(df.head(10), use_container_width=True)
 
-    st.sidebar.header("Settings")
-    # Hint: Avoid LocationID for classification!
-    target_col = st.sidebar.selectbox("Select Target Column", df.columns)
-    task_type  = st.sidebar.selectbox("Task Type", ["classification", "regression"])
+    # 🥈 SILVER
+    st.sidebar.header("⚙️ Settings")
+    target_col = st.sidebar.selectbox("Target Column (Avoid IDs!)", df.columns)
+    task_type = st.sidebar.selectbox("Task Type", ["classification", "regression"])
 
     df_clean = df.dropna()
     X = pd.get_dummies(df_clean.drop(columns=[target_col]), drop_first=True)
@@ -169,28 +168,48 @@ if uploaded_file:
     if task_type == "classification" and y.dtype == object:
         y = y.astype("category").cat.codes
 
-    st.write("### 🥈 Silver Layer: Cleaned Data Information")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write(f"**Total Samples:** {df_clean.shape[0]}")
-        st.write(f"**Features Count:** {df_clean.shape[1] - 1}")
-    with c2:
-        if st.button("💡 Generate AI Insights"):
-            with st.spinner("Asking Groq..."):
-                summary = df_clean.describe().to_markdown()
-                insights = get_groq_insight(summary, task_type)
-                st.info(insights)
+    st.write("### 🥈 Silver Layer: Cleaned Data")
+    col1, col2 = st.columns(2)
+    col1.metric("Total Samples", len(df_clean))
+    col2.metric("Features", len(X.columns))
 
+    if st.button("💡 Generate AI Insights"):
+        summary = df_clean.describe().to_markdown()
+        st.info(get_groq_insight(summary, task_type))
+
+    # 🥇 GOLD
     if st.sidebar.button("🚀 Run AutoML Pipeline"):
         st.write("---")
-        st.write("### 🥇 Gold Layer")
+        st.write("### 🥇 Gold Layer: Model Training")
+        
         try:
-            strat = y if task_type == "classification" else None
+            # Handle class imbalance for splitting
+            strat = y if (task_type == "classification" and pd.Series(y).value_counts().min() > 1) else None
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=strat)
-            best_name, best_model, all_results = run_automl(X_train, X_test, y_train, y_test, task_type)
-            st.success(f"✅ Best Model: **{best_name}**")
+            
+            if task_type == "classification":
+                models = {"Random Forest": RandomForestClassifier(), "Gradient Boosting": GradientBoostingClassifier(), "Logistic": LogisticRegression()}
+            else:
+                models = {"Random Forest": RandomForestRegressor(), "Gradient Boosting": GradientBoostingRegressor(), "Ridge": Ridge()}
+
+            n_splits = get_safe_cv_splits(y_train, task_type)
+            best_name, best_score, best_model = None, -np.inf, None
+
+            for name, m in models.items():
+                score = evaluate_model(m, X_train, y_train, X_test, y_test, task_type, n_splits)
+                if score > best_score:
+                    best_score, best_name, best_model = score, name, m
+
+            st.success(f"✅ Best Model: **{best_name}** (Score: {best_score:.4f})")
+            best_model.fit(X_train, y_train)
             show_shap(best_model, X_train, X_test)
+            
         except Exception as e:
-            st.error(f"❌ Training failed: {e}")
+            st.error(f"❌ Training Error: {e}")
+            st.info("💡 Try selecting a different Target Column (like 'Borough').")
+
 else:
-    st.info("📂 Please upload a dataset in the sidebar.")
+    st.info("📂 Please upload a dataset in the sidebar to begin.")
+
+st.markdown("---")
+st.caption("AutoML Agent | Cyber-Theme Edition")

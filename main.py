@@ -59,14 +59,14 @@ if uploaded_file:
     else:
         df = pd.read_excel(uploaded_file)
 
-    st.write("### ## Bronze Layer: Raw Data Preview")
+    st.write("### 🥉 Bronze Layer: Raw Data Preview")
     st.dataframe(df.head(10))
 
     # 2. SILVER LAYER: Automated Cleaning
     st.sidebar.header("Settings")
     target_col = st.sidebar.selectbox("Select Target Column", df.columns)
     task_type = st.sidebar.selectbox("Task Type", ["classification", "regression"])
-    
+
     # Simple Cleaning (Handling Nulls)
     df_clean = df.dropna()
     X = df_clean.drop(columns=[target_col])
@@ -74,58 +74,68 @@ if uploaded_file:
     X = pd.get_dummies(X, drop_first=True)
     y = df_clean[target_col]
 
-    st.write("### ## Silver Layer: Cleaned Data Information")
+    st.write("### 🥈 Silver Layer: Cleaned Data Information")
     col1, col2 = st.columns(2)
     with col1:
         st.write(f"**Total Samples:** {df_clean.shape[0]}")
         st.write(f"**Features Count:** {df_clean.shape[1] - 1}")
     with col2:
         if st.button("Generate AI Insights"):
-            summary = df_clean.describe().to_markdown() # Requires 'tabulate'
-            insights = get_gemini_insight(summary, task_type)
-            st.info(insights)
+            try:
+                summary = df_clean.describe().to_markdown()
+                insights = get_gemini_insight(summary, task_type)
+                st.info(insights)
+            except Exception as e:
+                st.warning(f"AI Insights unavailable: {e}")
 
     # 3. GOLD LAYER: AutoML Training
     if st.sidebar.button("Run AutoML Pipeline"):
         st.write("---")
-        st.write("### ## Gold Layer: Model Training & Evaluation")
-        
+        st.write("### 🥇 Gold Layer: Model Training & Evaluation")
+
         with st.spinner("Optimizing model with FLAML..."):
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+
             automl = AutoML()
             settings = {
                 "time_budget": 30,  # 30 seconds for demo
-                "metric": 'auto',
+                "metric": "auto",
                 "task": task_type,
-                "log_file_name": 'automl.log',
+                "log_file_name": "automl.log",
             }
-            
+
             automl.fit(X_train=X_train, y_train=y_train, **settings)
-            
-            # Results
-            st.success(f"Best Model Found: {automl.best_estimator}")
-            
-            y_pred = automl.predict(X_test)
+
+            st.success(f"✅ Best Model Found: **{automl.best_estimator}**")
+
+            # FIX: Convert predictions to clean numpy arrays
+            y_pred = np.array(automl.predict(X_test)).flatten()
+            y_test_arr = np.array(y_test).flatten()
+
             if task_type == "classification":
-                score = accuracy_score(y_test, y_pred)
+                score = accuracy_score(y_test_arr, y_pred)
                 st.metric("Model Accuracy", f"{score:.2%}")
             else:
-                score = np.sqrt(mean_squared_error(y_test, y_pred))
+                score = np.sqrt(mean_squared_error(y_test_arr, y_pred))
                 st.metric("RMSE", f"{score:.4f}")
 
         # 4. EXPLAINABILITY (SHAP)
-        st.write("### ## Interpretability (SHAP Analysis)")
-        explainer = shap.Explainer(automl.model.estimator, X_train)
-        shap_values = explainer(X_test)
+        st.write("### 🔍 Interpretability (SHAP Analysis)")
+        try:
+            explainer = shap.Explainer(automl.model.estimator, X_train)
+            shap_values = explainer(X_test)
 
-        fig, ax = plt.subplots()
-        shap.summary_plot(shap_values, X_test, show=False)
-        plt.gcf().set_facecolor('#1e1e26') # Match theme
-        st.pyplot(fig)
+            fig, ax = plt.subplots()
+            shap.summary_plot(shap_values, X_test, show=False)
+            plt.gcf().set_facecolor('#1e1e26')  # Match theme
+            st.pyplot(fig)
+        except Exception as e:
+            st.warning(f"⚠️ SHAP explainability unavailable for this model type: {e}")
 
 else:
-    st.info("Please upload a dataset in the sidebar to start the agent.")
+    st.info("📂 Please upload a dataset in the sidebar to start the agent.")
 
 # --- FOOTER ---
 st.markdown("---")

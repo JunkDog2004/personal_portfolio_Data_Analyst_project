@@ -1,13 +1,10 @@
 streamlit
-flaml
 pandas
 numpy
 matplotlib
 shap
-groq
+flaml
 scikit-learn
-google-generativeai
+groq
 openpyxl
 tabulate
-lightgbm
-xgboost

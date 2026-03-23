@@ -212,4 +212,4 @@ else:
     st.info("📂 Please upload a dataset in the sidebar to begin.")
 
 st.markdown("---")
-st.caption("AutoML Agent | Cyber-Theme Edition")
+st.caption("")

@@ -3,10 +3,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import shap
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 from sklearn.metrics import mean_squared_error, accuracy_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 import warnings
@@ -24,20 +22,58 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 def get_gemini_insight(df_summary, task):
-    """Generate AI insights using Gemini."""
     try:
         import google.generativeai as genai
-        prompt = f"As a data expert, provide 3 brief insights for a {task} task based on this data summary: {df_summary}"
         model = genai.GenerativeModel('gemini-pro')
+        prompt = f"As a data expert, provide 3 brief insights for a {task} task based on this data summary: {df_summary}"
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
         return f"Insight generation currently unavailable: {e}"
 
-def run_automl(X_train, X_test, y_train, y_test, task_type, time_budget):
+def get_safe_cv_splits(y, task_type, max_splits=5):
     """
-    Manual AutoML: tries multiple models, returns the best one.
-    Replaces FLAML which is broken on Python 3.14 + sklearn 1.8.
+    Calculate the maximum safe number of CV folds.
+    For classification: limited by the smallest class size.
+    For regression: limited by total sample count.
+    Minimum is 2. If even 2 splits is unsafe, returns None (use holdout only).
+    """
+    if task_type == "classification":
+        min_class_count = int(pd.Series(y).value_counts().min())
+        n_splits = min(max_splits, min_class_count)
+    else:
+        n_splits = min(max_splits, len(y) // 2)
+
+    return n_splits if n_splits >= 2 else None
+
+def evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits):
+    """
+    Evaluate a model. Uses CV if n_splits is valid, otherwise simple holdout scoring.
+    """
+    scoring = "accuracy" if task_type == "classification" else "r2"
+
+    if n_splits is not None:
+        if task_type == "classification":
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        else:
+            cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        scores = cross_val_score(model, X_train, y_train, cv=cv, scoring=scoring)
+        return scores.mean()
+    else:
+        # Fallback: fit on train, score on test directly
+        model.fit(X_train, y_train)
+        if task_type == "classification":
+            return accuracy_score(y_test, model.predict(X_test))
+        else:
+            preds = model.predict(X_test)
+            ss_res = np.sum((np.array(y_test) - preds) ** 2)
+            ss_tot = np.sum((np.array(y_test) - np.mean(y_test)) ** 2)
+            return 1 - ss_res / ss_tot if ss_tot != 0 else 0.0
+
+def run_automl(X_train, X_test, y_train, y_test, task_type):
+    """
+    Try multiple sklearn models, pick the best one.
+    Safely handles small datasets and imbalanced classes.
     """
     if task_type == "classification":
         candidates = {
@@ -45,14 +81,23 @@ def run_automl(X_train, X_test, y_train, y_test, task_type, time_budget):
             "Gradient Boosting":   GradientBoostingClassifier(n_estimators=100, random_state=42),
             "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
         }
-        scoring = "accuracy"
     else:
         candidates = {
             "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
             "Gradient Boosting": GradientBoostingRegressor(n_estimators=100, random_state=42),
             "Ridge Regression":  Ridge(),
         }
-        scoring = "r2"
+
+    # Calculate safe CV splits ONCE based on training data
+    n_splits = get_safe_cv_splits(y_train, task_type)
+
+    if n_splits is None:
+        st.info("ℹ️ Dataset too small for cross-validation. Using holdout evaluation instead.")
+        cv_method = "holdout"
+    else:
+        cv_method = f"{n_splits}-fold CV"
+
+    st.write(f"📋 Evaluation method: **{cv_method}**")
 
     best_name = None
     best_score = -np.inf
@@ -65,11 +110,10 @@ def run_automl(X_train, X_test, y_train, y_test, task_type, time_budget):
     for i, (name, model) in enumerate(candidates.items()):
         status.write(f"🔍 Trying **{name}**...")
         try:
-            cv_scores = cross_val_score(model, X_train, y_train, cv=3, scoring=scoring, n_jobs=-1)
-            mean_score = cv_scores.mean()
-            results[name] = mean_score
-            if mean_score > best_score:
-                best_score = mean_score
+            score = evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits)
+            results[name] = score
+            if score > best_score:
+                best_score = score
                 best_name = name
                 best_model = model
         except Exception as e:
@@ -80,7 +124,10 @@ def run_automl(X_train, X_test, y_train, y_test, task_type, time_budget):
     status.empty()
     progress.empty()
 
-    # Fit the best model on full training data
+    if best_model is None:
+        return None, None, results
+
+    # Final fit on full training data (needed if CV was used)
     best_model.fit(X_train, y_train)
     return best_name, best_model, results
 
@@ -107,8 +154,6 @@ if uploaded_file:
     st.sidebar.header("Settings")
     target_col = st.sidebar.selectbox("Select Target Column", df.columns)
     task_type = st.sidebar.selectbox("Task Type", ["classification", "regression"])
-    time_budget = st.sidebar.slider("Training Time Budget (seconds)", 30, 300, 120, 30,
-                                    help="Not used directly but controls patience.")
 
     df_clean = df.dropna()
     X = df_clean.drop(columns=[target_col])
@@ -116,11 +161,18 @@ if uploaded_file:
     y = df_clean[target_col]
 
     # Encode string targets for classification
-    label_map = None
     if task_type == "classification" and y.dtype == object:
-        y_cat = y.astype("category")
-        label_map = dict(enumerate(y_cat.cat.categories))
-        y = y_cat.cat.codes
+        y = y.astype("category").cat.codes
+
+    # ⚠️ Warn user if any class is very small
+    if task_type == "classification":
+        class_counts = pd.Series(y).value_counts()
+        tiny_classes = class_counts[class_counts < 5]
+        if not tiny_classes.empty:
+            st.warning(
+                f"⚠️ Some classes have very few samples ({tiny_classes.to_dict()}). "
+                "Cross-validation will be adjusted automatically."
+            )
 
     st.write("### 🥈 Silver Layer: Cleaned Data Information")
     col1, col2 = st.columns(2)
@@ -144,26 +196,38 @@ if uploaded_file:
         st.write("### 🥇 Gold Layer: Model Training & Evaluation")
 
         try:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
-            )
+            # Safe split: use stratify only for classification
+            split_kwargs = {"stratify": y} if task_type == "classification" else {}
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42, **split_kwargs
+                )
+            except ValueError:
+                # If stratified split fails (too few samples per class), do plain split
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42
+                )
 
             best_name, best_model, all_results = run_automl(
-                X_train, X_test, y_train, y_test, task_type, time_budget
+                X_train, X_test, y_train, y_test, task_type
             )
+
+            if best_model is None:
+                st.error("❌ All models failed to train. Please check your dataset (ensure enough samples per class).")
+                st.stop()
 
             st.success(f"✅ Best Model: **{best_name}**")
 
             # Show all model scores
-            with st.expander("📊 All Model Scores"):
-                score_label = "Accuracy" if task_type == "classification" else "R²"
+            score_label = "Accuracy" if task_type == "classification" else "R²"
+            with st.expander("📊 All Model Scores (CV)"):
                 for name, score in all_results.items():
                     if score is not None:
                         st.write(f"- **{name}**: {score:.4f} ({score_label})")
                     else:
                         st.write(f"- **{name}**: ❌ Failed")
 
-            # Final evaluation on test set
+            # Final test set evaluation
             y_pred = np.array(best_model.predict(X_test)).flatten()
             y_test_arr = np.array(y_test).flatten()
 
@@ -182,16 +246,15 @@ if uploaded_file:
         st.write("### 🔍 Interpretability (SHAP Analysis)")
         try:
             with st.spinner("Computing SHAP values..."):
-                # Use TreeExplainer for tree-based models, KernelExplainer as fallback
                 try:
                     explainer = shap.TreeExplainer(best_model)
                     shap_values = explainer.shap_values(X_test)
-                    # For classifiers, shap_values may be a list; take first class
                     if isinstance(shap_values, list):
                         shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
                 except Exception:
-                    explainer = shap.KernelExplainer(best_model.predict, shap.sample(X_train, 50))
-                    shap_values = explainer.shap_values(X_test.iloc[:50])
+                    sample = shap.sample(X_train, min(50, len(X_train)))
+                    explainer = shap.KernelExplainer(best_model.predict, sample)
+                    shap_values = explainer.shap_values(X_test.iloc[:min(50, len(X_test))])
 
                 fig, ax = plt.subplots(figsize=(10, 6))
                 shap.summary_plot(shap_values, X_test, show=False, plot_type="bar")

@@ -11,7 +11,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION & STYLING ---
-st.set_page_config(page_title="Analytics Platform", layout="wide")
+st.set_page_config(page_title="AutoML Analytics Platform", layout="wide")
 
 st.markdown("""
     <style>
@@ -24,43 +24,43 @@ st.markdown("""
 def get_gemini_insight(df_summary, task):
     try:
         import google.generativeai as genai
-        model = genai.GenerativeModel('gemini-pro')
-        prompt = f"As a data expert, provide 3 brief insights for a {task} task based on this data summary: {df_summary}"
+
+        
+        api_key = st.secrets.get("", None)
+        if not api_key:
+            return "⚠️ No API key found. Go to **Manage App → Settings → Secrets** and add:\n```\nGEMINI_API_KEY = 'your-key-here'\n```"
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = (
+            f"As a data expert, provide exactly 3 concise insights for a {task} task "
+            f"based on this data summary:\n{df_summary}\n"
+            f"Format as: 1. ... 2. ... 3. ..."
+        )
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Insight generation currently unavailable: {e}"
+        return f"Insight generation failed: {e}"
 
+# --- SAFE CV SPLIT CALCULATOR ---
 def get_safe_cv_splits(y, task_type, max_splits=5):
-    """
-    Calculate the maximum safe number of CV folds.
-    For classification: limited by the smallest class size.
-    For regression: limited by total sample count.
-    Minimum is 2. If even 2 splits is unsafe, returns None (use holdout only).
-    """
     if task_type == "classification":
         min_class_count = int(pd.Series(y).value_counts().min())
         n_splits = min(max_splits, min_class_count)
     else:
         n_splits = min(max_splits, len(y) // 2)
-
     return n_splits if n_splits >= 2 else None
 
+# --- MODEL EVALUATOR ---
 def evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits):
-    """
-    Evaluate a model. Uses CV if n_splits is valid, otherwise simple holdout scoring.
-    """
     scoring = "accuracy" if task_type == "classification" else "r2"
-
     if n_splits is not None:
-        if task_type == "classification":
-            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-        else:
-            cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42) \
+             if task_type == "classification" \
+             else KFold(n_splits=n_splits, shuffle=True, random_state=42)
         scores = cross_val_score(model, X_train, y_train, cv=cv, scoring=scoring)
         return scores.mean()
     else:
-        # Fallback: fit on train, score on test directly
         model.fit(X_train, y_train)
         if task_type == "classification":
             return accuracy_score(y_test, model.predict(X_test))
@@ -70,40 +70,28 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits)
             ss_tot = np.sum((np.array(y_test) - np.mean(y_test)) ** 2)
             return 1 - ss_res / ss_tot if ss_tot != 0 else 0.0
 
+# --- AUTOML RUNNER ---
 def run_automl(X_train, X_test, y_train, y_test, task_type):
-    """
-    Try multiple sklearn models, pick the best one.
-    Safely handles small datasets and imbalanced classes.
-    """
-    if task_type == "classification":
-        candidates = {
-            "Random Forest":       RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-            "Gradient Boosting":   GradientBoostingClassifier(n_estimators=100, random_state=42),
-            "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
-        }
-    else:
-        candidates = {
-            "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
-            "Gradient Boosting": GradientBoostingRegressor(n_estimators=100, random_state=42),
-            "Ridge Regression":  Ridge(),
-        }
+    candidates = {
+        "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+            if task_type == "classification"
+            else RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
+        "Gradient Boosting": GradientBoostingClassifier(n_estimators=100, random_state=42)
+            if task_type == "classification"
+            else GradientBoostingRegressor(n_estimators=100, random_state=42),
+        "Linear Model": LogisticRegression(max_iter=1000, random_state=42)
+            if task_type == "classification"
+            else Ridge(),
+    }
 
-    # Calculate safe CV splits ONCE based on training data
     n_splits = get_safe_cv_splits(y_train, task_type)
-
+    cv_label = f"{n_splits}-fold CV" if n_splits else "holdout"
     if n_splits is None:
-        st.info("ℹ️ Dataset too small for cross-validation. Using holdout evaluation instead.")
-        cv_method = "holdout"
-    else:
-        cv_method = f"{n_splits}-fold CV"
+        st.info("ℹ️ Dataset too small for cross-validation — using holdout evaluation.")
+    st.write(f"📋 Evaluation method: **{cv_label}**")
 
-    st.write(f"📋 Evaluation method: **{cv_method}**")
-
-    best_name = None
-    best_score = -np.inf
-    best_model = None
+    best_name, best_score, best_model = None, -np.inf, None
     results = {}
-
     progress = st.progress(0)
     status = st.empty()
 
@@ -113,9 +101,7 @@ def run_automl(X_train, X_test, y_train, y_test, task_type):
             score = evaluate_model(model, X_train, y_train, X_test, y_test, task_type, n_splits)
             results[name] = score
             if score > best_score:
-                best_score = score
-                best_name = name
-                best_model = model
+                best_score, best_name, best_model = score, name, model
         except Exception as e:
             results[name] = None
             st.warning(f"⚠️ {name} failed: {e}")
@@ -124,86 +110,121 @@ def run_automl(X_train, X_test, y_train, y_test, task_type):
     status.empty()
     progress.empty()
 
-    if best_model is None:
-        return None, None, results
+    if best_model is not None:
+        best_model.fit(X_train, y_train)  # Final fit on full training data
 
-    # Final fit on full training data (needed if CV was used)
-    best_model.fit(X_train, y_train)
     return best_name, best_model, results
 
-# --- APP HEADER ---
+# --- FAST SHAP (TreeExplainer only — no slow KernelExplainer) ---
+def show_shap(model, X_train, X_test, task_type):
+    st.write("### 🔍 Interpretability (SHAP Feature Importance)")
+    try:
+        with st.spinner("Computing SHAP values..."):
+            # TreeExplainer is fast (milliseconds). Never fall back to KernelExplainer.
+            explainer = shap.TreeExplainer(model)
+            # Limit to 100 rows max for speed
+            X_sample = X_test.iloc[:min(100, len(X_test))]
+            shap_values = explainer.shap_values(X_sample)
+
+            # For classifiers, shap_values is a list of arrays (one per class)
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            shap.summary_plot(shap_values, X_sample, show=False, plot_type="bar")
+            plt.gcf().set_facecolor("#1e1e26")
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+
+    except Exception as e:
+        # If TreeExplainer fails (e.g. linear model), show feature importances instead
+        st.warning(f"⚠️ SHAP TreeExplainer not available for this model. Showing feature importances instead.")
+        try:
+            if hasattr(model, "feature_importances_"):
+                importances = pd.Series(model.feature_importances_, index=X_train.columns)
+            elif hasattr(model, "coef_"):
+                importances = pd.Series(np.abs(model.coef_[0] if model.coef_.ndim > 1 else model.coef_), index=X_train.columns)
+            else:
+                st.info("Feature importance not available for this model.")
+                return
+
+            importances = importances.sort_values(ascending=True).tail(20)
+            fig, ax = plt.subplots(figsize=(10, 6))
+            importances.plot(kind="barh", ax=ax, color="#7c7cff")
+            ax.set_facecolor("#2b2b36")
+            fig.patch.set_facecolor("#1e1e26")
+            ax.tick_params(colors="white")
+            ax.xaxis.label.set_color("white")
+            ax.title.set_color("white")
+            ax.set_title("Feature Importances")
+            st.pyplot(fig)
+            plt.close()
+        except Exception as e2:
+            st.warning(f"Could not generate feature importance chart: {e2}")
+
+# =====================================================================
+# APP LAYOUT
+# =====================================================================
+
 st.title("📊 AutoML Deployment Agent")
 st.subheader("Automated Pipeline: Bronze → Silver → Gold Layer Insights")
 st.write("Upload your dataset to begin the automated cleaning, training, and explanation process.")
 
-# --- SIDEBAR ---
 st.sidebar.header("Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
 if uploaded_file:
     # 1. BRONZE LAYER
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-
+    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
     st.write("### 🥉 Bronze Layer: Raw Data Preview")
     st.dataframe(df.head(10))
 
-    # 2. SILVER LAYER
+    # 2. SILVER LAYER SETTINGS
     st.sidebar.header("Settings")
     target_col = st.sidebar.selectbox("Select Target Column", df.columns)
-    task_type = st.sidebar.selectbox("Task Type", ["classification", "regression"])
+    task_type  = st.sidebar.selectbox("Task Type", ["classification", "regression"])
 
     df_clean = df.dropna()
-    X = df_clean.drop(columns=[target_col])
-    X = pd.get_dummies(X, drop_first=True)
+    X = pd.get_dummies(df_clean.drop(columns=[target_col]), drop_first=True)
     y = df_clean[target_col]
 
-    # Encode string targets for classification
     if task_type == "classification" and y.dtype == object:
         y = y.astype("category").cat.codes
 
-    # ⚠️ Warn user if any class is very small
+    # Warn if tiny classes
     if task_type == "classification":
-        class_counts = pd.Series(y).value_counts()
-        tiny_classes = class_counts[class_counts < 5]
-        if not tiny_classes.empty:
-            st.warning(
-                f"⚠️ Some classes have very few samples ({tiny_classes.to_dict()}). "
-                "Cross-validation will be adjusted automatically."
-            )
+        tiny = pd.Series(y).value_counts()
+        tiny = tiny[tiny < 5]
+        if not tiny.empty:
+            st.warning(f"⚠️ Some classes have very few samples {tiny.to_dict()}. CV folds will be adjusted.")
 
     st.write("### 🥈 Silver Layer: Cleaned Data Information")
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.write(f"**Total Samples:** {df_clean.shape[0]}")
         st.write(f"**Features Count:** {df_clean.shape[1] - 1}")
         st.write(f"**Missing Values Dropped:** {df.shape[0] - df_clean.shape[0]}")
-    with col2:
-        if st.button("Generate AI Insights"):
+    with c2:
+        if st.button("💡 Generate AI Insights"):
             with st.spinner("Generating insights..."):
-                try:
-                    summary = df_clean.describe().to_markdown()
-                    insights = get_gemini_insight(summary, task_type)
-                    st.info(insights)
-                except Exception as e:
-                    st.warning(f"AI Insights unavailable: {e}")
+                summary = df_clean.describe().to_markdown()
+                insights = get_gemini_insight(summary, task_type)
+                st.info(insights)
 
     # 3. GOLD LAYER
-    if st.sidebar.button("Run AutoML Pipeline"):
+    if st.sidebar.button("🚀 Run AutoML Pipeline"):
         st.write("---")
         st.write("### 🥇 Gold Layer: Model Training & Evaluation")
 
         try:
-            # Safe split: use stratify only for classification
-            split_kwargs = {"stratify": y} if task_type == "classification" else {}
+            # Stratified split for classification, plain for regression
             try:
+                stratify = y if task_type == "classification" else None
                 X_train, X_test, y_train, y_test = train_test_split(
-                    X, y, test_size=0.2, random_state=42, **split_kwargs
+                    X, y, test_size=0.2, random_state=42, stratify=stratify
                 )
             except ValueError:
-                # If stratified split fails (too few samples per class), do plain split
                 X_train, X_test, y_train, y_test = train_test_split(
                     X, y, test_size=0.2, random_state=42
                 )
@@ -213,60 +234,36 @@ if uploaded_file:
             )
 
             if best_model is None:
-                st.error("❌ All models failed to train. Please check your dataset (ensure enough samples per class).")
+                st.error("❌ All models failed. Please check your dataset for sufficient samples per class.")
                 st.stop()
 
             st.success(f"✅ Best Model: **{best_name}**")
 
-            # Show all model scores
-            score_label = "Accuracy" if task_type == "classification" else "R²"
-            with st.expander("📊 All Model Scores (CV)"):
+            score_label = "Accuracy (CV)" if task_type == "classification" else "R² (CV)"
+            with st.expander("📊 All Model Scores"):
                 for name, score in all_results.items():
                     if score is not None:
                         st.write(f"- **{name}**: {score:.4f} ({score_label})")
                     else:
                         st.write(f"- **{name}**: ❌ Failed")
 
-            # Final test set evaluation
-            y_pred = np.array(best_model.predict(X_test)).flatten()
+            y_pred     = np.array(best_model.predict(X_test)).flatten()
             y_test_arr = np.array(y_test).flatten()
 
             if task_type == "classification":
-                score = accuracy_score(y_test_arr, y_pred)
-                st.metric("Test Accuracy", f"{score:.2%}")
+                st.metric("Test Accuracy", f"{accuracy_score(y_test_arr, y_pred):.2%}")
             else:
-                score = np.sqrt(mean_squared_error(y_test_arr, y_pred))
-                st.metric("Test RMSE", f"{score:.4f}")
+                st.metric("Test RMSE", f"{np.sqrt(mean_squared_error(y_test_arr, y_pred)):.4f}")
 
         except Exception as e:
             st.error(f"❌ Training failed: {e}")
             st.stop()
 
-        # 4. SHAP EXPLAINABILITY
-        st.write("### 🔍 Interpretability (SHAP Analysis)")
-        try:
-            with st.spinner("Computing SHAP values..."):
-                try:
-                    explainer = shap.TreeExplainer(best_model)
-                    shap_values = explainer.shap_values(X_test)
-                    if isinstance(shap_values, list):
-                        shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
-                except Exception:
-                    sample = shap.sample(X_train, min(50, len(X_train)))
-                    explainer = shap.KernelExplainer(best_model.predict, sample)
-                    shap_values = explainer.shap_values(X_test.iloc[:min(50, len(X_test))])
-
-                fig, ax = plt.subplots(figsize=(10, 6))
-                shap.summary_plot(shap_values, X_test, show=False, plot_type="bar")
-                plt.gcf().set_facecolor('#1e1e26')
-                plt.tight_layout()
-                st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"⚠️ SHAP unavailable for this model: {e}")
+        # 4. FAST SHAP
+        show_shap(best_model, X_train, X_test, task_type)
 
 else:
     st.info("📂 Please upload a dataset in the sidebar to start the agent.")
 
-# --- FOOTER ---
 st.markdown("---")
 st.caption("AutoML Deployment Agent | Built with Streamlit & Scikit-learn")
